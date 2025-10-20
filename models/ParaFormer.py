@@ -6,7 +6,7 @@ from einops.layers.torch import Rearrange
 import time
 
 
-############################### Used in Single GPU training and testing ##############################
+############################### Used in Single and Multi GPU training and testing ##############################
 
 def pair(t):
     return t if isinstance(t, tuple) else (t, t)
@@ -158,63 +158,3 @@ class ParaFormer(nn.Module):
         x = x.mean(dim = 1) if self.pool == 'mean' else x[:, 0]
         x = self.to_latent(x)
         return self.mlp_head(x)
-    
-    # used in train and test depth = n, parallel = m
-    def forward_step(self, img, num_branches, feature_flag = False):
-        x = self.to_patch_embedding(img)
-        b, n, _ = x.shape
-
-        cls_tokens = repeat(self.cls_token, '() n d -> b n d', b = b)
-        x = torch.cat((cls_tokens, x), dim=1)
-        x += self.pos_embedding[:, :(n + 1)]
-        x = self.dropout(x)
-
-        if self.available_devices: # for multiple GPUs
-            self.inputs = [x.to(self.paraformerbranches.device_map[i]) for i in range(num_branches+1)]
-            branches_to_run = self.paraformerbranches.branches[:num_branches+1]
-            outputs = parallel_apply(branches_to_run, self.inputs[:num_branches+1], devices = self.paraformerbranches.device_map[:num_branches+1])
-            x = torch.sum(torch.stack([out.to(self.available_devices[0]) for out in outputs]), dim=0)
-        else: # for single GPU
-            outputs = []
-            for i in range(num_branches+1):
-                outputs.append(self.paraformerbranches.branches[i](x))
-
-            x = torch.sum(torch.stack(outputs), dim=0)
-
-        x = x.mean(dim = 1) if self.pool == 'mean' else x[:, 0]
-        feature = x
-        x = self.to_latent(x)
-        if feature_flag:
-            return self.mlp_head(x), feature
-        else:
-            return self.mlp_head(x)
-
-    # used in test: depth = n, parallel = 1 
-    def forward_to_depth(self, img, num_branches, branch_depth, feature_flag=False):
-
-        x = self.to_patch_embedding(img)
-        b, n, _ = x.shape
-        
-        cls_tokens = repeat(self.cls_token, '() n d -> b n d', b=b)
-        x = torch.cat((cls_tokens, x), dim=1)
-        x += self.pos_embedding[:, :(n + 1)]
-        x = self.dropout(x)
-        
-        for block_idx in range(num_branches + 1):
-            if block_idx < num_branches:
-                x = self.transformer.blocks[block_idx](x)
-            else:
-                block = self.transformer.blocks[block_idx]
-                for layer_idx, layer in enumerate(block):
-                    if layer_idx // 2 > branch_depth: 
-                        break
-                    x = layer(x)
-    
-        x = x[:, 0]
-        feature = x
-        x = self.to_latent(x)
-        
-        if feature_flag:
-            return self.mlp_head(x), feature
-        else:
-            return self.mlp_head(x)
